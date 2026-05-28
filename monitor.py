@@ -43,7 +43,6 @@ class Posting:
     link: str
     company: str
     pub_date: str
-    description_html: str
     description_snippet: str
 
 
@@ -51,9 +50,14 @@ class Posting:
 
 
 def extract_id(link: str) -> int | None:
-    # Accept trailing slash, query string, fragment, or end of string after the ID.
-    match = re.search(r"/delo/(\d+)(?:[/?#]|$)", link or "")
+    # \b after the digits stops at any non-word char (/, ?, #, ., -, end of string)
+    # but rejects /delo/7717abc which is a different (alphanumeric) path.
+    match = re.search(r"/delo/(\d+)\b", link or "")
     return int(match.group(1)) if match else None
+
+
+def _clean_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
 
 
 class _TagStripper(HTMLParser):
@@ -63,6 +67,18 @@ class _TagStripper(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         self._chunks.append(data)
+
+    # Inject whitespace at every tag boundary so adjacent tags
+    # (e.g. <li>A</li><li>B</li>) don't get concatenated into "AB".
+    # _clean_text collapses the resulting runs back down.
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        self._chunks.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        self._chunks.append(" ")
+
+    def handle_startendtag(self, tag: str, attrs: list) -> None:
+        self._chunks.append(" ")
 
     def text(self) -> str:
         return "".join(self._chunks)
@@ -81,7 +97,7 @@ def html_to_snippet(raw_html: str, max_len: int = SNIPPET_LEN) -> str:
         text = html.unescape(text)
     else:
         text = stripper.text()
-    text = re.sub(r"\s+", " ", text).strip()
+    text = _clean_text(text)
     if len(text) > max_len:
         text = text[: max_len - 1].rstrip() + "…"
     return text
@@ -143,21 +159,24 @@ def parse_feed(raw: bytes, http_charset: str | None = None) -> list[Posting]:
         raise RuntimeError(f"Feed XML is malformed: {parsed.bozo_exception!r}")
 
     postings: list[Posting] = []
+    seen_ids: set[int] = set()
     for entry in parsed.entries:
         link = getattr(entry, "link", "") or ""
         pid = extract_id(link)
         if pid is None:
             print(f"[warn] skipping entry with no extractable ID: {link!r}", file=sys.stderr)
             continue
+        if pid in seen_ids:
+            continue
+        seen_ids.add(pid)
         description_html = getattr(entry, "description", "") or getattr(entry, "summary", "") or ""
         postings.append(
             Posting(
                 id=pid,
-                title=(getattr(entry, "title", "") or "").strip(),
+                title=_clean_text(getattr(entry, "title", "") or ""),
                 link=link,
-                company=(getattr(entry, "author", "") or "").strip(),
-                pub_date=(getattr(entry, "published", "") or "").strip(),
-                description_html=description_html,
+                company=_clean_text(getattr(entry, "author", "") or ""),
+                pub_date=_clean_text(getattr(entry, "published", "") or ""),
                 description_snippet=html_to_snippet(description_html),
             )
         )

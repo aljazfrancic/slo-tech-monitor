@@ -13,6 +13,12 @@ on:
 permissions:
   contents: write
 
+# Serialize runs so a manual workflow_dispatch overlapping with the cron
+# can't race the state.json push (and double-email).
+concurrency:
+  group: monitor-state
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -48,8 +54,10 @@ jobs:
             if git push; then
               exit 0
             fi
-            echo "Push attempt $attempt failed; rebasing on remote and retrying..." >&2
-            git pull --rebase origin "${GITHUB_REF_NAME}"
+            if [ "$attempt" -lt 3 ]; then
+              echo "Push attempt $attempt failed; rebasing on remote and retrying..." >&2
+              git pull --rebase origin "${GITHUB_REF_NAME}"
+            fi
           done
           echo "All push attempts failed." >&2
           exit 1

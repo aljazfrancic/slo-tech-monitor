@@ -45,6 +45,8 @@ workflows under the Actions tab.
 
 ## Run locally
 
+Requires Python 3.10 or newer (the workflow uses 3.11).
+
 ```sh
 python -m venv .venv
 # Windows:

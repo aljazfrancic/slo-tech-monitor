@@ -60,7 +60,10 @@ jobs:
             fi
             if [ "$attempt" -lt 3 ]; then
               echo "Push attempt $attempt failed; rebasing on remote and retrying..." >&2
-              git pull --rebase origin "${GITHUB_REF_NAME}"
+              if ! git pull --rebase origin "${GITHUB_REF_NAME}"; then
+                echo "Rebase failed; cannot retry push." >&2
+                exit 1
+              fi
             fi
           done
           echo "All push attempts failed." >&2

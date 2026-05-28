@@ -50,10 +50,16 @@ class Posting:
 
 
 def extract_id(link: str) -> int | None:
-    # \b after the digits stops at any non-word char (/, ?, #, ., -, end of string)
-    # but rejects /delo/7717abc which is a different (alphanumeric) path.
-    match = re.search(r"/delo/(\d+)\b", link or "")
-    return int(match.group(1)) if match else None
+    # Anchor to slo-tech.com so unrelated RSS links containing "/delo/<n>"
+    # can't masquerade as postings. \b after the digits stops at /, ?, #, .,
+    # -, end of string; rejects /delo/7717abc which is a different path.
+    # Reject ID 0 — load_state validates positive ints, so a 0 from a junk
+    # entry would round-trip into state.json and crash the next run.
+    match = re.match(r"https?://slo-tech\.com/delo/(\d+)\b", link or "")
+    if not match:
+        return None
+    pid = int(match.group(1))
+    return pid if pid > 0 else None
 
 
 def _clean_text(s: str) -> str:
@@ -61,20 +67,29 @@ def _clean_text(s: str) -> str:
 
 
 class _TagStripper(HTMLParser):
+    # Drop the inner text of these tags — it's code, not content.
+    _SKIP_TAGS = frozenset({"script", "style"})
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._chunks: list[str] = []
+        self._skip_depth = 0
 
     def handle_data(self, data: str) -> None:
-        self._chunks.append(data)
+        if self._skip_depth == 0:
+            self._chunks.append(data)
 
     # Inject whitespace at every tag boundary so adjacent tags
     # (e.g. <li>A</li><li>B</li>) don't get concatenated into "AB".
     # _clean_text collapses the resulting runs back down.
     def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
         self._chunks.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
         self._chunks.append(" ")
 
     def handle_startendtag(self, tag: str, attrs: list) -> None:
@@ -112,9 +127,11 @@ def fetch_feed(
             resp = requests.get(url, timeout=timeout, headers={"User-Agent": "slo-tech-delo-monitor/1.0"})
             resp.raise_for_status()
         except requests.HTTPError as exc:
-            # 4xx is a client error (bad URL, auth, etc.); retrying won't help.
+            # 4xx is usually a client error (bad URL, auth) and retrying won't
+            # help. 408 (timeout), 425 (too early), and 429 (rate limit) are
+            # transient and worth another attempt.
             status = exc.response.status_code if exc.response is not None else None
-            if status is not None and 400 <= status < 500:
+            if status is not None and 400 <= status < 500 and status not in (408, 425, 429):
                 raise RuntimeError(f"Feed at {url} returned HTTP {status}") from exc
             last_exc = exc
         except requests.RequestException as exc:

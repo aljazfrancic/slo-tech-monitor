@@ -15,6 +15,7 @@ import os
 import re
 import smtplib
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -29,6 +30,7 @@ STATE_PATH = Path(__file__).parent / "state.json"
 MAX_STATE_SIZE = 200
 FEED_ENCODING = "iso-8859-2"
 HTTP_TIMEOUT = 30
+HTTP_RETRIES = 2
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 SNIPPET_LEN = 280
@@ -71,6 +73,7 @@ def html_to_snippet(raw_html: str, max_len: int = SNIPPET_LEN) -> str:
     stripper = _TagStripper()
     try:
         stripper.feed(raw_html)
+        stripper.close()
     except Exception:
         # Malformed HTML — fall back to unescape + naive tag strip.
         text = re.sub(r"<[^>]+>", " ", raw_html)
@@ -83,26 +86,41 @@ def html_to_snippet(raw_html: str, max_len: int = SNIPPET_LEN) -> str:
     return text
 
 
-def fetch_feed(url: str = RSS_URL, timeout: int = HTTP_TIMEOUT) -> bytes:
-    try:
-        resp = requests.get(url, timeout=timeout, headers={"User-Agent": "slo-tech-delo-monitor/1.0"})
-        resp.raise_for_status()
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Failed to fetch {url}: {exc}") from exc
-    if not resp.content:
-        raise RuntimeError(f"Feed at {url} returned empty body")
-    return resp.content
+def fetch_feed(url: str = RSS_URL, timeout: int = HTTP_TIMEOUT, retries: int = HTTP_RETRIES) -> bytes:
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(url, timeout=timeout, headers={"User-Agent": "slo-tech-delo-monitor/1.0"})
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(2**attempt)
+            continue
+        if not resp.content:
+            raise RuntimeError(f"Feed at {url} returned empty body")
+        return resp.content
+    raise RuntimeError(f"Failed to fetch {url} after {retries + 1} attempts: {last_exc}") from last_exc
+
+
+def _detect_encoding(raw: bytes, default: str = FEED_ENCODING) -> str:
+    # XML declarations are always ASCII-compatible, so this prefix decode is safe.
+    head = raw[:512].decode("ascii", errors="replace")
+    match = re.search(r"""encoding\s*=\s*["']([^"']+)["']""", head)
+    return match.group(1) if match else default
 
 
 def parse_feed(raw: bytes) -> list[Posting]:
     # The feed declares ISO-8859-2 but Content-Type can be inconsistent.
-    # Decode bytes explicitly, then hand UTF-8 to feedparser with the
-    # XML declaration rewritten so it doesn't try to redecode wrong.
+    # Decode bytes explicitly with the encoding the feed declares (or fall
+    # back to FEED_ENCODING), then hand UTF-8 to feedparser with the XML
+    # declaration rewritten so it doesn't try to redecode wrong.
+    encoding = _detect_encoding(raw)
     try:
-        text = raw.decode(FEED_ENCODING)
-    except UnicodeDecodeError as exc:
-        raise RuntimeError(f"Cannot decode feed as {FEED_ENCODING}: {exc}") from exc
-    text = re.sub(r'encoding="[^"]+"', 'encoding="utf-8"', text, count=1)
+        text = raw.decode(encoding)
+    except (UnicodeDecodeError, LookupError) as exc:
+        raise RuntimeError(f"Cannot decode feed as {encoding}: {exc}") from exc
+    text = re.sub(r"""encoding\s*=\s*["'][^"']+["']""", 'encoding="utf-8"', text, count=1)
 
     parsed = feedparser.parse(text.encode("utf-8"))
     if parsed.bozo and not parsed.entries:
@@ -205,22 +223,33 @@ def format_seed(total: int) -> tuple[str, str, str]:
 
 
 def merge_state(current_ids: list[int], existing_seen: list[int], max_size: int = MAX_STATE_SIZE) -> list[int]:
-    current_set = set(current_ids)
-    merged = list(current_ids) + [x for x in existing_seen if x not in current_set]
+    seen: set[int] = set()
+    merged: list[int] = []
+    for x in [*current_ids, *existing_seen]:
+        if x in seen:
+            continue
+        seen.add(x)
+        merged.append(x)
     return merged[:max_size]
 
 
 # ---------- impure boundary ----------
 
 
-def load_state(path: Path = STATE_PATH) -> list[int]:
+def load_state(path: Path = STATE_PATH) -> list[int] | None:
+    # Returns None when no state has been recorded yet (file missing or
+    # empty). An explicit `[]` in the file means "initialized but currently
+    # tracking nothing" and returns []. Callers use the None vs [] distinction
+    # to detect a true first run.
     if not path.exists():
-        return []
+        return None
     raw = path.read_text(encoding="utf-8").strip()
     if not raw:
-        return []
+        return None
     data = json.loads(raw)
-    if not isinstance(data, list) or not all(isinstance(x, int) for x in data):
+    if not isinstance(data, list) or not all(
+        isinstance(x, int) and not isinstance(x, bool) for x in data
+    ):
         raise RuntimeError(f"{path} must be a JSON array of integers")
     return data
 
@@ -276,10 +305,20 @@ def main(argv: list[str]) -> int:
 
     print(f"Fetched {len(postings)} entries.", file=sys.stderr)
 
-    seen = load_state(STATE_PATH)
-    is_first_run = not seen
+    try:
+        seen = load_state(STATE_PATH)
+    except (RuntimeError, ValueError) as exc:
+        print(f"State error: {exc}", file=sys.stderr)
+        return 1
+    is_first_run = seen is None
 
     if is_first_run:
+        if not postings:
+            print(
+                "First run but feed returned no entries — refusing to seed with empty state.",
+                file=sys.stderr,
+            )
+            return 1
         subject, text, html_body = format_seed(len(postings))
     else:
         new_postings = diff_new(postings, set(seen))
@@ -298,7 +337,10 @@ def main(argv: list[str]) -> int:
         print(f"Email send failed: {exc}", file=sys.stderr)
         return 1
 
-    merged = merge_state([p.id for p in postings], seen)
+    # State is written AFTER email send: if save_state fails we'll re-send the
+    # digest tomorrow, which is preferable to writing state first and silently
+    # dropping postings if email later fails.
+    merged = merge_state([p.id for p in postings], seen or [])
     save_state(STATE_PATH, merged)
     print(f"State updated ({len(merged)} IDs tracked).", file=sys.stderr)
     return 0

@@ -2,10 +2,10 @@ name: slo-tech delo monitor
 
 on:
   # 07:00 UTC daily.
-  # Anchored to winter (CET, UTC+1) -> fires at 08:00 local Nov-Mar,
-  # and at 09:00 local Apr-Oct due to CEST (UTC+2). GitHub Actions cron
-  # has no DST awareness; change to "0 6 * * *" if you'd rather anchor
-  # to summer time.
+  # Anchored to winter (CET, UTC+1) -> fires at 08:00 local from the last
+  # Sun of Oct through the last Sun of Mar, and at 09:00 local for the rest
+  # of the year due to CEST (UTC+2). GitHub Actions cron has no DST
+  # awareness; change to "0 6 * * *" if you'd rather anchor to summer time.
   schedule:
     - cron: "0 7 * * *"
   workflow_dispatch:
@@ -24,6 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history so the rebase retry below survives any unusual
+          # concurrent-push scenario.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:

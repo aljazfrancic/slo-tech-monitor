@@ -89,8 +89,9 @@ and has no DST awareness, so the actual local fire time depends on the season:
 To anchor to summer time instead, change the cron to `0 6 * * *` in
 `.github/workflows/monitor.yml`.
 
-GitHub Actions may also delay scheduled runs by several minutes under load -- the
-schedule is best-effort, not guaranteed.
+GitHub Actions may delay scheduled runs by several minutes under load, and during
+heavy load it may skip a scheduled run entirely -- the schedule is best-effort,
+not guaranteed.
 
 ## Failure behaviour
 

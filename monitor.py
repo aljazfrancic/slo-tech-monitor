@@ -111,6 +111,12 @@ def fetch_feed(
         try:
             resp = requests.get(url, timeout=timeout, headers={"User-Agent": "slo-tech-delo-monitor/1.0"})
             resp.raise_for_status()
+        except requests.HTTPError as exc:
+            # 4xx is a client error (bad URL, auth, etc.); retrying won't help.
+            status = exc.response.status_code if exc.response is not None else None
+            if status is not None and 400 <= status < 500:
+                raise RuntimeError(f"Feed at {url} returned HTTP {status}") from exc
+            last_exc = exc
         except requests.RequestException as exc:
             last_exc = exc
         else:
@@ -132,8 +138,10 @@ def _detect_encoding(
     raw: bytes, http_charset: str | None = None, default: str = FEED_ENCODING
 ) -> str:
     # XML declarations are always ASCII-compatible, so this prefix decode is safe.
+    # Anchor to <?xml ... ?> so an `encoding=` attribute elsewhere in the head
+    # (e.g. xmlns:encoding="...") can't be misread as the document encoding.
     head = raw[:512].decode("ascii", errors="replace")
-    match = re.search(r"""encoding\s*=\s*["']([^"']+)["']""", head)
+    match = re.search(r"""<\?xml[^?]*encoding\s*=\s*["']([^"']+)["']""", head)
     if match:
         return match.group(1)
     if http_charset:
@@ -152,7 +160,13 @@ def parse_feed(raw: bytes, http_charset: str | None = None) -> list[Posting]:
         text = raw.decode(encoding)
     except (UnicodeDecodeError, LookupError) as exc:
         raise RuntimeError(f"Cannot decode feed as {encoding}: {exc}") from exc
-    text = re.sub(r"""encoding\s*=\s*["'][^"']+["']""", 'encoding="utf-8"', text, count=1)
+    # Only rewrite the encoding inside the XML declaration itself.
+    text = re.sub(
+        r"""(<\?xml[^?]*encoding\s*=\s*)["'][^"']+["']""",
+        r'\1"utf-8"',
+        text,
+        count=1,
+    )
 
     parsed = feedparser.parse(text.encode("utf-8"))
     if parsed.bozo and not parsed.entries:
@@ -258,13 +272,9 @@ def format_seed(total: int) -> tuple[str, str, str]:
 
 
 def merge_state(current_ids: list[int], existing_seen: list[int], max_size: int = MAX_STATE_SIZE) -> list[int]:
-    seen: set[int] = set()
-    merged: list[int] = []
-    for x in [*current_ids, *existing_seen]:
-        if x in seen:
-            continue
-        seen.add(x)
-        merged.append(x)
+    # Sort descending so the cap deterministically keeps the highest (newest)
+    # IDs regardless of the order feedparser hands entries to us.
+    merged = sorted({*current_ids, *existing_seen}, reverse=True)
     return merged[:max_size]
 
 
@@ -283,9 +293,9 @@ def load_state(path: Path = STATE_PATH) -> list[int] | None:
         return None
     data = json.loads(raw)
     if not isinstance(data, list) or not all(
-        isinstance(x, int) and not isinstance(x, bool) for x in data
+        isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in data
     ):
-        raise RuntimeError(f"{path} must be a JSON array of integers")
+        raise RuntimeError(f"{path} must be a JSON array of positive integers")
     return data
 
 

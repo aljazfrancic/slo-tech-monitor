@@ -51,7 +51,8 @@ class Posting:
 
 
 def extract_id(link: str) -> int | None:
-    match = re.search(r"/delo/(\d+)/?$", link or "")
+    # Accept trailing slash, query string, fragment, or end of string after the ID.
+    match = re.search(r"/delo/(\d+)(?:[/?#]|$)", link or "")
     return int(match.group(1)) if match else None
 
 
@@ -86,7 +87,9 @@ def html_to_snippet(raw_html: str, max_len: int = SNIPPET_LEN) -> str:
     return text
 
 
-def fetch_feed(url: str = RSS_URL, timeout: int = HTTP_TIMEOUT, retries: int = HTTP_RETRIES) -> bytes:
+def fetch_feed(
+    url: str = RSS_URL, timeout: int = HTTP_TIMEOUT, retries: int = HTTP_RETRIES
+) -> tuple[bytes, str | None]:
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -94,28 +97,41 @@ def fetch_feed(url: str = RSS_URL, timeout: int = HTTP_TIMEOUT, retries: int = H
             resp.raise_for_status()
         except requests.RequestException as exc:
             last_exc = exc
-            if attempt < retries:
-                time.sleep(2**attempt)
-            continue
-        if not resp.content:
-            raise RuntimeError(f"Feed at {url} returned empty body")
-        return resp.content
+        else:
+            if resp.content:
+                return resp.content, _http_charset(resp.headers.get("Content-Type", ""))
+            last_exc = RuntimeError(f"Feed at {url} returned empty body")
+        if attempt < retries:
+            time.sleep(2**attempt)
     raise RuntimeError(f"Failed to fetch {url} after {retries + 1} attempts: {last_exc}") from last_exc
 
 
-def _detect_encoding(raw: bytes, default: str = FEED_ENCODING) -> str:
+def _http_charset(content_type: str) -> str | None:
+    # Content-Type charset may be quoted per RFC 7231.
+    match = re.search(r"""charset\s*=\s*["']?([\w.-]+)""", content_type, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _detect_encoding(
+    raw: bytes, http_charset: str | None = None, default: str = FEED_ENCODING
+) -> str:
     # XML declarations are always ASCII-compatible, so this prefix decode is safe.
     head = raw[:512].decode("ascii", errors="replace")
     match = re.search(r"""encoding\s*=\s*["']([^"']+)["']""", head)
-    return match.group(1) if match else default
+    if match:
+        return match.group(1)
+    if http_charset:
+        return http_charset
+    return default
 
 
-def parse_feed(raw: bytes) -> list[Posting]:
+def parse_feed(raw: bytes, http_charset: str | None = None) -> list[Posting]:
     # The feed declares ISO-8859-2 but Content-Type can be inconsistent.
-    # Decode bytes explicitly with the encoding the feed declares (or fall
-    # back to FEED_ENCODING), then hand UTF-8 to feedparser with the XML
-    # declaration rewritten so it doesn't try to redecode wrong.
-    encoding = _detect_encoding(raw)
+    # Prefer the XML declaration; fall back to the HTTP Content-Type charset
+    # if the declaration is absent, then to FEED_ENCODING. Then hand UTF-8
+    # to feedparser with the XML declaration rewritten so it doesn't try to
+    # redecode wrong.
+    encoding = _detect_encoding(raw, http_charset)
     try:
         text = raw.decode(encoding)
     except (UnicodeDecodeError, LookupError) as exc:
@@ -297,8 +313,8 @@ def main(argv: list[str]) -> int:
             return 1
 
     try:
-        raw = fetch_feed()
-        postings = parse_feed(raw)
+        raw, http_charset = fetch_feed()
+        postings = parse_feed(raw, http_charset)
     except RuntimeError as exc:
         print(f"Feed error: {exc}", file=sys.stderr)
         return 1
@@ -341,7 +357,11 @@ def main(argv: list[str]) -> int:
     # digest tomorrow, which is preferable to writing state first and silently
     # dropping postings if email later fails.
     merged = merge_state([p.id for p in postings], seen or [])
-    save_state(STATE_PATH, merged)
+    try:
+        save_state(STATE_PATH, merged)
+    except OSError as exc:
+        print(f"State save failed: {exc}", file=sys.stderr)
+        return 1
     print(f"State updated ({len(merged)} IDs tracked).", file=sys.stderr)
     return 0
 

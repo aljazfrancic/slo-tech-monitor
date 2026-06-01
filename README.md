@@ -1,6 +1,6 @@
 # slo-tech.com/delo monitor
 
-A daily cron that fetches the [slo-tech.com/delo](https://slo-tech.com/delo) RSS feed,
+A cron (every 4 hours) that fetches the [slo-tech.com/delo](https://slo-tech.com/delo) RSS feed,
 diffs against the last-known set of posting IDs in `state.json`, and emails any new
 postings via Gmail SMTP. Runs on GitHub Actions, commits the updated `state.json` back
 to the repo. First run seeds state and sends a single initialization email so you
@@ -78,22 +78,29 @@ python monitor.py
 `main`) and hit the green button. The workflow only commits to `state.json` if
 the contents actually changed.
 
-## Schedule and DST caveat
+## Schedule
 
-The workflow is scheduled for `0 7 * * *` UTC. GitHub Actions cron is UTC-only
-and has no DST awareness, so the actual local fire time depends on the season:
+The workflow runs every 4 hours at 6 minutes past the hour
+(`6 */4 * * *` -> 00:06, 04:06, 08:06, 12:06, 16:06, 20:06 UTC). Cron is UTC-only,
+so local clock times shift by an hour across DST, but at a 4-hourly cadence that
+doesn't matter in practice.
 
-| Period (Europe/Ljubljana) | Local fire time |
-|---------------------------|-----------------|
-| Last Sun Oct -> Last Sun Mar (CET, UTC+1)  | **08:00** local |
-| Last Sun Mar -> Last Sun Oct (CEST, UTC+2) | **09:00** local |
+The `:06` offset is deliberate: GitHub's shared cron scheduler is most congested
+at the top of the hour, and runs queued there can be delayed by hours -- or, under
+heavy load, skipped entirely. Firing at `:06` sidesteps the worst of it, but
+scheduling is still best-effort, not guaranteed.
 
-To anchor to summer time instead, change the cron to `0 6 * * *` in
-`.github/workflows/monitor.yml`.
+None of this is a bug in the monitor -- it's a documented GitHub limitation. Per
+GitHub's [docs on the `schedule` event](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule),
+scheduled runs "can be delayed during periods of high loads of GitHub Actions
+workflow runs" and, if load is high enough, "some queued jobs may be dropped." The
+**first** scheduled run after a cron is added or changed is especially prone to being
+missed: GitHub can take a while (sometimes an hour or more) to register a new
+schedule, and a skipped run is never retried.
 
-GitHub Actions may delay scheduled runs by several minutes under load, and during
-heavy load it may skip a scheduled run entirely -- the schedule is best-effort,
-not guaranteed.
+A missed run loses nothing here -- `state.json` is only written on a successful run,
+so the next run just catches up on anything new. To force a run immediately, trigger
+it manually (see [Manual trigger](#manual-trigger) above).
 
 ## Failure behaviour
 

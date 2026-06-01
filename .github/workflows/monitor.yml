@@ -1,13 +1,13 @@
 name: slo-tech delo monitor
 
 on:
-  # 07:00 UTC daily.
-  # Anchored to winter (CET, UTC+1) -> fires at 08:00 local from the last
-  # Sun of Oct through the last Sun of Mar, and at 09:00 local for the rest
-  # of the year due to CEST (UTC+2). GitHub Actions cron has no DST
-  # awareness; change to "0 6 * * *" if you'd rather anchor to summer time.
+  # Every 4 hours at :06 past the hour (00:06, 04:06, ... 20:06 UTC).
+  # The :06 offset dodges the top-of-the-hour congestion on GitHub's shared
+  # cron scheduler, which can otherwise delay queued runs by hours. Cron is
+  # UTC-only so local clock times shift by an hour across DST, but at a
+  # 4-hourly cadence that's irrelevant.
   schedule:
-    - cron: "0 7 * * *"
+    - cron: "6 */4 * * *"
   workflow_dispatch:
 
 permissions:

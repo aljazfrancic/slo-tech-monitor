@@ -1,4 +1,4 @@
-"""Daily monitor for new job postings on slo-tech.com/delo.
+"""Monitor for new job postings on slo-tech.com/delo.
 
 Pipeline: fetch RSS -> parse -> diff against state.json -> email digest.
 

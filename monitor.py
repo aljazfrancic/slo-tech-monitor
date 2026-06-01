@@ -344,7 +344,7 @@ def send_email(
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="slo-tech/delo daily monitor")
+    parser = argparse.ArgumentParser(description="slo-tech/delo monitor")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be sent; do not email or persist state.")
     args = parser.parse_args(argv)
 

@@ -14,6 +14,7 @@ import json
 import os
 import re
 import smtplib
+import socket
 import sys
 import time
 from dataclasses import dataclass
@@ -24,6 +25,14 @@ from pathlib import Path
 
 import feedparser
 import requests
+import urllib3.util.connection as _urllib3_conn
+
+# GitHub-hosted runners have no working outbound IPv6. slo-tech.com is
+# dual-stack (publishes both A and AAAA records), so resolution can hand us its
+# IPv6 address and the connect fails immediately with ENETUNREACH ("Network is
+# unreachable") — intermittently, depending on what the runner's resolver
+# returns that run. Pinning requests/urllib3 to IPv4 sidesteps it entirely.
+_urllib3_conn.allowed_gai_family = lambda: socket.AF_INET
 
 RSS_URL = "https://slo-tech.com/delo/rss"
 STATE_PATH = Path(__file__).parent / "state.json"

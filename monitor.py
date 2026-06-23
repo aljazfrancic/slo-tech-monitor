@@ -45,6 +45,17 @@ SMTP_PORT = 587
 SNIPPET_LEN = 280
 
 
+class FeedUnavailable(RuntimeError):
+    """Feed couldn't be fetched for a transient reason (network timeout,
+    connection reset, 5xx, rate limit). The site itself is presumably fine and
+    the next scheduled run will catch up — so this is non-fatal: we log it and
+    exit 0 rather than failing the workflow on every upstream hiccup.
+
+    Permanent problems (HTTP 4xx, malformed feed body) stay plain RuntimeError
+    and remain fatal, because those need a human to look.
+    """
+
+
 @dataclass(frozen=True)
 class Posting:
     id: int
@@ -151,7 +162,7 @@ def fetch_feed(
             last_exc = RuntimeError(f"Feed at {url} returned empty body")
         if attempt < retries:
             time.sleep(2**attempt)
-    raise RuntimeError(f"Failed to fetch {url} after {retries + 1} attempts: {last_exc}") from last_exc
+    raise FeedUnavailable(f"Failed to fetch {url} after {retries + 1} attempts: {last_exc}") from last_exc
 
 
 def _http_charset(content_type: str) -> str | None:
@@ -370,6 +381,12 @@ def main(argv: list[str]) -> int:
     try:
         raw, http_charset = fetch_feed()
         postings = parse_feed(raw, http_charset)
+    except FeedUnavailable as exc:
+        # Transient upstream/network failure (e.g. connect timeout from the
+        # runner to slo-tech.com). Skip this run rather than failing the
+        # workflow — the monitor diffs by state, so the next run catches up.
+        print(f"Feed temporarily unavailable, skipping this run: {exc}", file=sys.stderr)
+        return 0
     except RuntimeError as exc:
         print(f"Feed error: {exc}", file=sys.stderr)
         return 1

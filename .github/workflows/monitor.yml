@@ -52,18 +52,37 @@ jobs:
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state.json
-          git commit -m "chore: update state.json [skip ci]"
+
+          # Preserve the freshly-generated state.json outside the repo so we can
+          # re-apply it onto the latest remote tip if a concurrent push beats us.
+          cp state.json "${RUNNER_TEMP}/state.json.new"
+
           for attempt in 1 2 3; do
-            if git push; then
+            cp "${RUNNER_TEMP}/state.json.new" state.json
+            git add state.json
+            # Fold into the previous commit when it is already a state.json
+            # chore commit, instead of stacking another identical one — this
+            # keeps history from filling up with hundreds of "update state.json"
+            # commits. Amending a commit that's already on the remote rewrites
+            # it, so the push below must be a force push.
+            if [[ "$(git log -1 --format=%s)" == "chore: update state.json"* ]]; then
+              git commit --amend -m "chore: update state.json [skip ci]" --quiet
+            else
+              git commit -m "chore: update state.json [skip ci]" --quiet
+            fi
+            # --force-with-lease only overwrites the remote if it is still where
+            # our remote-tracking ref expects — a concurrent human push breaks
+            # the lease and is rejected (not clobbered), sending us to retry.
+            if git push --force-with-lease; then
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
-              echo "Push attempt $attempt failed; rebasing on remote and retrying..." >&2
-              if ! git pull --rebase origin "${GITHUB_REF_NAME}"; then
-                echo "Rebase failed; cannot retry push." >&2
+              echo "Push attempt $attempt failed; resyncing to remote and retrying..." >&2
+              if ! git fetch origin "${GITHUB_REF_NAME}"; then
+                echo "Fetch failed; cannot retry push." >&2
                 exit 1
               fi
+              git reset --hard "origin/${GITHUB_REF_NAME}"
             fi
           done
           echo "All push attempts failed." >&2
